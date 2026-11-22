@@ -474,6 +474,8 @@ contract Flovatar: NonFungibleToken{
 		// It checks for the right category and series before executing.
 		access(Flovatar.PrivateEnt)
 		fun setAccessory(component: @FlovatarComponent.NFT): @FlovatarComponent.NFT?{ 
+			FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: component.id)
+			FlovatarComponentTemplate.assertUsable(nftType: Type<@Flovatar.NFT>(), id: self.id)
 			if(component.getCategory() != "accessory") {
 				panic("The component needs to be an accessory")
 			}
@@ -502,6 +504,8 @@ contract Flovatar: NonFungibleToken{
 		// It checks for the right category and series before executing.
 		access(Flovatar.PrivateEnt)
 		fun setHat(component: @FlovatarComponent.NFT): @FlovatarComponent.NFT?{ 
+			FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: component.id)
+			FlovatarComponentTemplate.assertUsable(nftType: Type<@Flovatar.NFT>(), id: self.id)
 			if(component.getCategory() != "hat") {
 				panic("The component needs to be a hat")
 			}
@@ -530,6 +534,8 @@ contract Flovatar: NonFungibleToken{
 		// It checks for the right category and series before executing.
 		access(Flovatar.PrivateEnt)
 		fun setEyeglasses(component: @FlovatarComponent.NFT): @FlovatarComponent.NFT?{ 
+			FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: component.id)
+			FlovatarComponentTemplate.assertUsable(nftType: Type<@Flovatar.NFT>(), id: self.id)
 			if(component.getCategory() != "eyeglasses") {
 				panic("The component needs to be a pair of eyeglasses")
 			}
@@ -558,6 +564,8 @@ contract Flovatar: NonFungibleToken{
 		// It checks for the right category and series before executing.
 		access(Flovatar.PrivateEnt)
 		fun setBackground(component: @FlovatarComponent.NFT): @FlovatarComponent.NFT?{ 
+			FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: component.id)
+			FlovatarComponentTemplate.assertUsable(nftType: Type<@Flovatar.NFT>(), id: self.id)
 			if(component.getCategory() != "background") {
 				panic("The component needs to be a background")
 			}
@@ -710,6 +718,9 @@ contract Flovatar: NonFungibleToken{
 						traits.append(trait)
 					}
 				}
+				if FlovatarComponentTemplate.isRestricted(nftType: Type<@Flovatar.NFT>(), id: self.id, owner: self.owner?.address) {
+					traits.append(MetadataViews.Trait(name: "restricted", value: true, displayType: "Boolean", rarity: nil))
+				}
 				return MetadataViews.Traits(traits)
 			}
 			if view == Type<MetadataViews.Rarity>(){ 
@@ -783,6 +794,7 @@ contract Flovatar: NonFungibleToken{
 		// withdraw removes an NFT from the collection and moves it to the caller
 		access(NonFungibleToken.Withdraw)
 		fun withdraw(withdrawID: UInt64): @{NonFungibleToken.NFT}{ 
+			FlovatarComponentTemplate.assertTransferAllowed(nftType: Type<@Flovatar.NFT>(), id: withdrawID, owner: self.owner?.address)
 			let token <- self.ownedNFTs.remove(key: withdrawID) ?? panic("missing NFT")
 			emit Withdraw(id: token.id, from: self.owner?.address)
 			return <-token
@@ -794,6 +806,7 @@ contract Flovatar: NonFungibleToken{
 		fun deposit(token: @{NonFungibleToken.NFT}){ 
 			let token <- token as! @Flovatar.NFT
 			let id: UInt64 = token.id
+			FlovatarComponentTemplate.assertDepositAllowed(nftType: Type<@Flovatar.NFT>(), id: id, to: self.owner?.address)
 			
 			// add the new token to the dictionary which removes the old one
 			let oldToken <- self.ownedNFTs[id] <- token
@@ -885,6 +898,12 @@ contract Flovatar: NonFungibleToken{
 
 
 
+
+	// Restriction status of a Flovatar (see FlovatarComponentTemplate restrictions)
+	access(all)
+	view fun isRestricted(id: UInt64, owner: Address?): Bool {
+		return FlovatarComponentTemplate.isRestricted(nftType: Type<@Flovatar.NFT>(), id: id, owner: owner)
+	}
 
 	access(all) 
 	view fun getContractViews(resourceType: Type?): [Type] {
@@ -1102,6 +1121,19 @@ contract Flovatar: NonFungibleToken{
 	// for each component used
 	access(all)
 	fun createFlovatar(spark: @FlovatarComponent.NFT, body: UInt64, hair: UInt64, facialHair: UInt64?, eyes: UInt64, nose: UInt64, mouth: UInt64, clothing: UInt64, accessory: @FlovatarComponent.NFT?, hat: @FlovatarComponent.NFT?, eyeglasses: @FlovatarComponent.NFT?, background: @FlovatarComponent.NFT?, rareBoost: @[FlovatarComponent.NFT], epicBoost: @[FlovatarComponent.NFT], legendaryBoost: @[FlovatarComponent.NFT], address: Address): @Flovatar.NFT{ 
+		// Restricted components (see FlovatarComponentTemplate restrictions) can't be used to build a Flovatar
+		FlovatarComponentTemplate.assertAddressAllowed(address)
+		FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: spark.id)
+		if accessory != nil { FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: accessory?.id!) }
+		if hat != nil { FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: hat?.id!) }
+		if eyeglasses != nil { FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: eyeglasses?.id!) }
+		if background != nil { FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: background?.id!) }
+		var r = 0
+		while r < rareBoost.length { FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: rareBoost[r].id); r = r + 1 }
+		r = 0
+		while r < epicBoost.length { FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: epicBoost[r].id); r = r + 1 }
+		r = 0
+		while r < legendaryBoost.length { FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: legendaryBoost[r].id); r = r + 1 }
 		if(spark.getCategory() != "spark"){
 			panic("The spark component belongs to the wrong category")
 		}

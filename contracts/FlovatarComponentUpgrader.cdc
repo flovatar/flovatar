@@ -12,6 +12,14 @@ import "Flovatar"
 
  This contract provides the ability for users to upgrade their Flobits
 
+ PATCH (capability audit 2026-11):
+ - withdrawRandomComponent now uses revertibleRandom<UInt64>(modulo:) -> unbiased, and the
+   last candidate in the pool can be selected again (old RandomInt range was [0, len-2]).
+ - setUpgradeEnableByAdmin(): pause switch callable with a reference to the existing
+   FlovatarInbox.Admin resource (the old setUpgradeEnable was access(account) with no caller).
+ NOTE: the outcome is still revertible (a caller can abort and retry). A commit-reveal
+ design is required for non-revertible randomness; keep upgrades paused until then.
+
  */
 
 access(all)
@@ -170,8 +178,9 @@ contract FlovatarComponentUpgrader{
 				let component <- self.withdrawComponent(id: components[UInt64(0)])
 				return <-component
 			}
-			let randomPos: RandomInt = RandomInt(uuid: revertibleRandom<UInt64>(), field: fieldString, minValue: UInt64(0), maxValue: UInt64(components.length - Int(1)))
-			let component <- self.withdrawComponent(id: components[randomPos.getValue()])
+			// PATCH: unbiased index in [0, components.length) (old code never picked the last element)
+			let randomPos: UInt64 = revertibleRandom<UInt64>(modulo: UInt64(components.length))
+			let component <- self.withdrawComponent(id: components[randomPos])
 			return <-component
 		}
 		
@@ -205,6 +214,8 @@ contract FlovatarComponentUpgrader{
 				"Vault not of the right Token Type"
 			components.length == 10:
 				"You need to provide exactly 10 Flobits for the upgrade"
+			!FlovatarComponentTemplate.isAddressRestricted(address):
+				"Restricted: this address is restricted"
 		}
 		if let upgraderCollection =
 			self.account.storage.borrow<auth(Withdraw) &FlovatarComponentUpgrader.Collection>(
@@ -217,6 +228,7 @@ contract FlovatarComponentUpgrader{
 			var outputRarity: String = ""
 			var i: UInt32 = 0
 			while i < UInt32(components.length){ 
+				FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: components[i].id)
 				let template = FlovatarComponentTemplate.getComponentTemplate(id: components[i].templateId)!
 				if i == UInt32(0){ 
 					componentSeries = template.series
@@ -275,6 +287,18 @@ contract FlovatarComponentUpgrader{
 	access(account)
 	fun setUpgradeEnable(enabled: Bool){ 
 		self.upgradeEnabled = enabled
+	}
+	
+	// PATCH: admin-gated pause switch. Only holders of a FlovatarInbox.Admin resource
+	// (stored at /storage/FlovatarInboxAdmin in the contract account) can obtain this reference.
+	access(all)
+	fun setUpgradeEnableByAdmin(admin: &FlovatarInbox.Admin, enabled: Bool){ 
+		self.upgradeEnabled = enabled
+	}
+	
+	access(all)
+	view fun isUpgradeEnabled(): Bool{ 
+		return self.upgradeEnabled
 	}
 	
 	init(){ 

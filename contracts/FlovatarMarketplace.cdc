@@ -3,6 +3,7 @@ import "NonFungibleToken"
 import "FlowToken"
 import "Flovatar"
 import "FlovatarComponent"
+import "FlovatarComponentTemplate"
 
 /*
  A standard marketplace contract with Royalties management and hardcoded against Flovatar and Components.
@@ -157,6 +158,7 @@ contract FlovatarMarketplace{
 		access(Withdraw)
 		fun listFlovatarForSale(token: @Flovatar.NFT, price: UFix64){ 
 			let id = token.id
+			FlovatarComponentTemplate.assertTransferAllowed(nftType: Type<@Flovatar.NFT>(), id: id, owner: self.owner?.address)
 			
 			// store the price in the price array
 			self.flovatarPrices[id] = price
@@ -172,6 +174,7 @@ contract FlovatarMarketplace{
 		access(Withdraw)
 		fun listFlovatarComponentForSale(token: @FlovatarComponent.NFT, price: UFix64){ 
 			let id = token.id
+			FlovatarComponentTemplate.assertTransferAllowed(nftType: Type<@FlovatarComponent.NFT>(), id: id, owner: self.owner?.address)
 			let mint = token.mint
 			
 			// store the price in the price array
@@ -210,6 +213,8 @@ contract FlovatarMarketplace{
 					"Not enough tokens to buy the NFT!"
 			}
 			let recipient = recipientCap.borrow()!
+			FlovatarComponentTemplate.assertTransferAllowed(nftType: Type<@Flovatar.NFT>(), id: tokenId, owner: self.owner?.address)
+			FlovatarComponentTemplate.assertAddressAllowed(recipientCap.address)
 			
 			// get the value out of the optional
 			let price = self.flovatarPrices[tokenId]!
@@ -247,6 +252,8 @@ contract FlovatarMarketplace{
 					"Not enough tokens to buy the NFT!"
 			}
 			let recipient = recipientCap.borrow()!
+			FlovatarComponentTemplate.assertTransferAllowed(nftType: Type<@FlovatarComponent.NFT>(), id: tokenId, owner: self.owner?.address)
+			FlovatarComponentTemplate.assertAddressAllowed(recipientCap.address)
 			
 			// get the value out of the optional
 			let price = self.flovatarComponentPrices[tokenId]!
