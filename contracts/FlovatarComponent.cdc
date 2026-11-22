@@ -229,6 +229,10 @@ contract FlovatarComponent: NonFungibleToken{
 				traits.append(trait)
 				let setTrait = MetadataViews.Trait(name: "set", value: template.category, displayType: "String", rarity: nil)
 				traits.append(setTrait)
+				// Restriction flag (see FlovatarComponentTemplate restrictions), only present when restricted
+				if FlovatarComponentTemplate.isRestricted(nftType: Type<@FlovatarComponent.NFT>(), id: self.id, owner: self.owner?.address) {
+					traits.append(MetadataViews.Trait(name: "restricted", value: true, displayType: "Boolean", rarity: nil))
+				}
 				return MetadataViews.Traits(traits)
 			}
 			if view == Type<MetadataViews.Rarity>(){ 
@@ -309,6 +313,7 @@ contract FlovatarComponent: NonFungibleToken{
 		// withdraw removes an NFT from the collection and moves it to the caller
 		access(NonFungibleToken.Withdraw)
 		fun withdraw(withdrawID: UInt64): @{NonFungibleToken.NFT}{ 
+			FlovatarComponentTemplate.assertTransferAllowed(nftType: Type<@FlovatarComponent.NFT>(), id: withdrawID, owner: self.owner?.address)
 			let token <- self.ownedNFTs.remove(key: withdrawID) ?? panic("missing NFT")
 			emit Withdraw(id: token.id, from: self.owner?.address)
 			return <-token
@@ -320,6 +325,7 @@ contract FlovatarComponent: NonFungibleToken{
 		fun deposit(token: @{NonFungibleToken.NFT}){ 
 			let token <- token as! @FlovatarComponent.NFT
 			let id: UInt64 = token.id
+			FlovatarComponentTemplate.assertDepositAllowed(nftType: Type<@FlovatarComponent.NFT>(), id: id, to: self.owner?.address)
 			
 			// add the new token to the dictionary which removes the old one
 			let oldToken <- self.ownedNFTs[id] <- token
@@ -386,6 +392,12 @@ contract FlovatarComponent: NonFungibleToken{
 
 
 
+
+	// Restriction status of a component (see FlovatarComponentTemplate restrictions)
+	access(all)
+	view fun isRestricted(id: UInt64, owner: Address?): Bool {
+		return FlovatarComponentTemplate.isRestricted(nftType: Type<@FlovatarComponent.NFT>(), id: id, owner: owner)
+	}
 
 	access(all) 
 	view fun getContractViews(resourceType: Type?): [Type] {

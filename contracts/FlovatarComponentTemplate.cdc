@@ -345,6 +345,278 @@ contract FlovatarComponentTemplate{
 		return <-newComponentTemplate
 	}
 	
+	// ----------------------------------------------------------------------------------------------------------------
+	// Restrictions (2026-11 incident)
+	//
+	// Admin-managed registry of restricted addresses and restricted NFT ids. The NFT, marketplace, inbox and crafting
+	// contracts of this account consult it:
+	//   - a restricted id can't be withdrawn, sold, listed, used for crafting / building / upgrading,
+	//     and can only be deposited into this contract account itself;
+	//   - a restricted address can't withdraw, sell, claim or receive this account's NFTs / rewards.
+	//
+	// Why it lives here: Flow mainnet does not accept NEW contract deployments without allow-listing, and an
+	// in-place update can't add fields to an existing contract. So this was added in an update as new nested types
+	// and functions, and the state is a FlovatarComponentTemplate.RestrictionsRegistry resource saved in this contract account's
+	// storage at /storage/FlovatarRestrictionsRegistry (created by setupRestrictionsRegistry, called from an admin transaction).
+	// No registry = nothing is restricted.
+	//
+	// Every change emits an event. Restrictions can be removed again by the admin (to fix mistakes).
+	// Status is public: isRestricted / getRestrictionStatus, and the NFT contracts add a "restricted" trait to their
+	// metadata.
+	// ----------------------------------------------------------------------------------------------------------------
+
+	access(all) entitlement RestrictionsManage
+
+	access(all) event AddressRestricted(address: Address, reason: String)
+	access(all) event AddressUnrestricted(address: Address)
+	access(all) event IDsRestricted(nftType: String, ids: [UInt64], reason: String)
+	access(all) event IDsUnrestricted(nftType: String, ids: [UInt64])
+
+	access(all) struct RestrictionStatus {
+		access(all) let nftType: String
+		access(all) let id: UInt64
+		access(all) let idRestricted: Bool
+		access(all) let ownerRestricted: Bool
+		access(all) let reason: String?
+
+		view init(nftType: String, id: UInt64, idRestricted: Bool, ownerRestricted: Bool, reason: String?) {
+			self.nftType = nftType
+			self.id = id
+			self.idRestricted = idRestricted
+			self.ownerRestricted = ownerRestricted
+			self.reason = reason
+		}
+	}
+
+	// Held only in this contract account's storage. Mutators need the RestrictionsManage entitlement, which only the
+	// account itself can obtain (storage borrow); no capability to it is ever issued.
+	access(all) resource RestrictionsRegistry {
+
+		// address -> reason
+		access(self) let restrictedAddresses: {Address: String}
+
+		// NFT type identifier -> (id -> reason)
+		access(self) let restrictedIDs: {String: {UInt64: String}}
+
+		access(all) view fun getAddressReason(_ address: Address): String? {
+			return self.restrictedAddresses[address]
+		}
+
+		access(all) view fun getIDReason(nftType: String, id: UInt64): String? {
+			if let ids = &self.restrictedIDs[nftType] as &{UInt64: String}? {
+				return ids[id]
+			}
+			return nil
+		}
+
+		access(all) view fun getRestrictedAddresses(): [Address] {
+			return self.restrictedAddresses.keys
+		}
+
+		access(all) view fun getRestrictedTypes(): [String] {
+			return self.restrictedIDs.keys
+		}
+
+		access(all) view fun getRestrictedIDCount(nftType: String): Int {
+			if let ids = &self.restrictedIDs[nftType] as &{UInt64: String}? {
+				return ids.length
+			}
+			return 0
+		}
+
+		access(all) view fun getRestrictedIDs(nftType: String, from: Int, upTo: Int): [UInt64] {
+			if let ids = &self.restrictedIDs[nftType] as &{UInt64: String}? {
+				let keys = ids.keys
+				let end = upTo < keys.length ? upTo : keys.length
+				if from >= end {
+					return []
+				}
+				return keys.slice(from: from, upTo: end)
+			}
+			return []
+		}
+
+		access(RestrictionsManage) fun restrictAddress(_ address: Address, reason: String) {
+			self.restrictedAddresses[address] = reason
+			emit AddressRestricted(address: address, reason: reason)
+		}
+
+		access(RestrictionsManage) fun unrestrictAddress(_ address: Address) {
+			self.restrictedAddresses.remove(key: address)
+			emit AddressUnrestricted(address: address)
+		}
+
+		// Batches: keep ids.length <= 500 per call (event size / computation).
+		access(RestrictionsManage) fun restrictIDs(nftType: Type, ids: [UInt64], reason: String) {
+			pre {
+				ids.length <= 500: "Max 500 ids per call"
+			}
+			let key = nftType.identifier
+			if self.restrictedIDs[key] == nil {
+				self.restrictedIDs[key] = {}
+			}
+			let map = (&self.restrictedIDs[key] as auth(Mutate) &{UInt64: String}?)!
+			for id in ids {
+				map[id] = reason
+			}
+			emit IDsRestricted(nftType: key, ids: ids, reason: reason)
+		}
+
+		access(RestrictionsManage) fun unrestrictIDs(nftType: Type, ids: [UInt64]) {
+			pre {
+				ids.length <= 500: "Max 500 ids per call"
+			}
+			let key = nftType.identifier
+			if let map = &self.restrictedIDs[key] as auth(Mutate) &{UInt64: String}? {
+				for id in ids {
+					map.remove(key: id)
+				}
+			}
+			emit IDsUnrestricted(nftType: key, ids: ids)
+		}
+
+		init() {
+			self.restrictedAddresses = {}
+			self.restrictedIDs = {}
+		}
+	}
+
+	access(all) view fun getRestrictionsRegistryStoragePath(): StoragePath {
+		return /storage/FlovatarRestrictionsRegistry
+	}
+
+	access(contract) view fun borrowRestrictionsRegistry(): &RestrictionsRegistry? {
+		return self.account.storage.borrow<&RestrictionsRegistry>(from: /storage/FlovatarRestrictionsRegistry)
+	}
+
+	// True once setupRestrictionsRegistry has been run by the contract account.
+	access(all) view fun isRestrictionsRegistrySetUp(): Bool {
+		return self.borrowRestrictionsRegistry() != nil
+	}
+
+	// Creates the registry in this contract account's storage. Only the contract account can call it with effect
+	// (it must pass a reference to its own account). Idempotent.
+	access(all) fun setupRestrictionsRegistry(account: auth(Storage) &Account) {
+		pre {
+			account.address == self.account.address: "Only the contract account can set up the restrictions registry"
+		}
+		if account.storage.type(at: /storage/FlovatarRestrictionsRegistry) == nil {
+			account.storage.save(<-create RestrictionsRegistry(), to: /storage/FlovatarRestrictionsRegistry)
+		}
+	}
+
+	// ---- public, read-only views ----
+
+	access(all) view fun isAddressRestricted(_ address: Address?): Bool {
+		if address == nil {
+			return false
+		}
+		if let registry = self.borrowRestrictionsRegistry() {
+			return registry.getAddressReason(address!) != nil
+		}
+		return false
+	}
+
+	access(all) view fun isIDRestricted(nftType: Type, id: UInt64): Bool {
+		if let registry = self.borrowRestrictionsRegistry() {
+			return registry.getIDReason(nftType: nftType.identifier, id: id) != nil
+		}
+		return false
+	}
+
+	// True if the id is restricted or the given holder address is restricted.
+	access(all) view fun isRestricted(nftType: Type, id: UInt64, owner: Address?): Bool {
+		return self.isIDRestricted(nftType: nftType, id: id) || self.isAddressRestricted(owner)
+	}
+
+	access(all) view fun getRestrictionStatus(nftType: Type, id: UInt64, owner: Address?): RestrictionStatus {
+		var reason: String? = nil
+		if let registry = self.borrowRestrictionsRegistry() {
+			reason = registry.getIDReason(nftType: nftType.identifier, id: id)
+			if reason == nil && owner != nil {
+				reason = registry.getAddressReason(owner!)
+			}
+		}
+		return RestrictionStatus(
+			nftType: nftType.identifier,
+			id: id,
+			idRestricted: self.isIDRestricted(nftType: nftType, id: id),
+			ownerRestricted: self.isAddressRestricted(owner),
+			reason: reason
+		)
+	}
+
+	access(all) view fun getAddressReason(_ address: Address): String? {
+		if let registry = self.borrowRestrictionsRegistry() {
+			return registry.getAddressReason(address)
+		}
+		return nil
+	}
+
+	access(all) view fun getRestrictedAddresses(): [Address] {
+		if let registry = self.borrowRestrictionsRegistry() {
+			return registry.getRestrictedAddresses()
+		}
+		return []
+	}
+
+	access(all) view fun getRestrictedTypes(): [String] {
+		if let registry = self.borrowRestrictionsRegistry() {
+			return registry.getRestrictedTypes()
+		}
+		return []
+	}
+
+	access(all) view fun getRestrictedIDCount(nftType: Type): Int {
+		if let registry = self.borrowRestrictionsRegistry() {
+			return registry.getRestrictedIDCount(nftType: nftType.identifier)
+		}
+		return 0
+	}
+
+	// Paged list (ids are returned in dictionary order).
+	access(all) view fun getRestrictedIDs(nftType: Type, from: Int, upTo: Int): [UInt64] {
+		if let registry = self.borrowRestrictionsRegistry() {
+			return registry.getRestrictedIDs(nftType: nftType.identifier, from: from, upTo: upTo)
+		}
+		return []
+	}
+
+	// ---- checks used by the NFT / marketplace / crafting contracts (they panic) ----
+
+	// Withdrawing / transferring / listing / selling an NFT held by `owner`.
+	access(all) view fun assertTransferAllowed(nftType: Type, id: UInt64, owner: Address?) {
+		pre {
+			!self.isIDRestricted(nftType: nftType, id: id): "Restricted: this NFT is restricted and can't be transferred, sold or used"
+			!self.isAddressRestricted(owner): "Restricted: the holder address is restricted"
+		}
+	}
+
+	// Depositing an NFT into a collection owned by `to`.
+	// Restricted ids may only be deposited into this contract account (or into a collection that is not stored yet).
+	access(all) view fun assertDepositAllowed(nftType: Type, id: UInt64, to: Address?) {
+		pre {
+			!self.isAddressRestricted(to): "Restricted: the recipient address is restricted"
+			!self.isIDRestricted(nftType: nftType, id: id) || to == nil || to == self.account.address: "Restricted: this NFT is restricted and can't be deposited here"
+		}
+	}
+
+	// Using an NFT as input of crafting / building / upgrading / equipping.
+	access(all) view fun assertUsable(nftType: Type, id: UInt64) {
+		pre {
+			!self.isIDRestricted(nftType: nftType, id: id): "Restricted: this NFT is restricted and can't be used"
+		}
+	}
+
+	// An address that wants to claim / receive rewards or act as buyer / seller.
+	access(all) view fun assertAddressAllowed(_ address: Address?) {
+		pre {
+			!self.isAddressRestricted(address): "Restricted: this address is restricted"
+		}
+	}
+
+	// ---------------------------------------------------------------------------------------------- end Restrictions
+
 	init(){ 
 		self.CollectionPublicPath = /public/FlovatarComponentTemplateCollection
 		self.CollectionStoragePath = /storage/FlovatarComponentTemplateCollection

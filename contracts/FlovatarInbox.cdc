@@ -15,6 +15,18 @@ import "HybridCustody"
 
  This contract contains also the Admin resource that can be used to manage the different inboxes.
 
+ SECURITY PATCH (capability audit 2026-11):
+ - Container.insertComponent / withdrawComponent / withdrawDust are now access(contract)
+   (they were access(all) and reachable by anyone through the public Inbox capability,
+   because Cadence 1.0 lets a public &{CollectionPublic} capability be borrowed as &Collection).
+ - Collection.borrowFlovatarContainer / borrowWalletContainer are now access(contract).
+ - Collection dictionaries are access(contract) (read access via the getters only).
+ - Read-only getters no longer create empty Containers / lastClaimedDust entries
+   (prevented storage griefing of the contract account).
+ - Contract-level getters read the Collection from contract storage instead of the public
+   capability (fixes getFlovatarComponentIDs, which borrowed auth(Withdraw) from a public
+   path and therefore always returned []).
+
  The following inboxes are provided:
  - DUST reward vault for each Flovatar
  - Flobit (FlovatarComponent) airdrop/reward collection for each Flovatar
@@ -136,14 +148,14 @@ contract FlovatarInbox{
 			self.blockHeight = getCurrentBlock().height
 		}
 		
-		access(all)
+		access(contract)
 		fun insertComponent(component: @FlovatarComponent.NFT){ 
 			let oldComponent <- self.flovatarComponents[component.id] <- component
 			destroy oldComponent
 			self.blockHeight = getCurrentBlock().height
 		}
 		
-		access(all)
+		access(contract)
 		fun withdrawComponent(id: UInt64): @FlovatarComponent.NFT{ 
 			pre{ 
 				self.blockHeight <= getCurrentBlock().height:
@@ -153,7 +165,7 @@ contract FlovatarInbox{
 			return <-token
 		}
 
-		access(all)
+		access(contract)
 		fun withdrawDust(amount: UFix64): @{FungibleToken.Vault}{ 
 			return <-self.dustVault.withdraw(amount: amount)
 		}
@@ -194,15 +206,15 @@ contract FlovatarInbox{
 	resource Collection: CollectionPublic{ 
 		
 		// Dictionary of Containers for the Flovatars and the Flovatar Owners Wallets
-		access(all)
+		access(contract)
 		var flovatarContainers: @{UInt64: FlovatarInbox.Container}
 		
-		access(all)
+		access(contract)
 		var walletContainers: @{Address: FlovatarInbox.Container}
 		
 		// Dictionary to remember the last time that DUST was claimed by each Flovatar
 		// so that it can calculate the right amount to be claimable
-		access(all)
+		access(contract)
 		var lastClaimedDust:{ UInt64: UFix64}
 		
 		init(){ 
@@ -212,7 +224,8 @@ contract FlovatarInbox{
 		}
 		
 		// Borrows the Container Collection for the Flovatar and if not present it initializes it
-		access(all)
+		// PATCH: was access(all) -> anyone could get &Container and call withdraw*
+		access(contract)
 		fun borrowFlovatarContainer(id: UInt64): &FlovatarInbox.Container{ 
 			if self.flovatarContainers[id] == nil{ 
 				let oldContainer <- self.flovatarContainers[id] <- create Container()
@@ -222,7 +235,8 @@ contract FlovatarInbox{
 		}
 		
 		// Borrows the Container Collection for the Flovatar Owner Wallet and if not present it initializes it
-		access(all)
+		// PATCH: was access(all) -> anyone could get &Container and call withdraw*
+		access(contract)
 		fun borrowWalletContainer(address: Address): &FlovatarInbox.Container{ 
 			if self.walletContainers[address] == nil{ 
 				let oldContainer <- self.walletContainers[address] <- create Container()
@@ -231,11 +245,27 @@ contract FlovatarInbox{
 			return (&self.walletContainers[address] as &FlovatarInbox.Container?)!
 		}
 		
+		// PATCH: non-mutating lookups used by the read-only getters (no Container creation)
+		access(contract)
+		view fun peekFlovatarContainer(id: UInt64): &FlovatarInbox.Container?{ 
+			return &self.flovatarContainers[id] as &FlovatarInbox.Container?
+		}
+		
+		access(contract)
+		view fun peekWalletContainer(address: Address): &FlovatarInbox.Container?{ 
+			return &self.walletContainers[address] as &FlovatarInbox.Container?
+		}
+		
 		access(all)
 		fun depositDustToFlovatar(id: UInt64, vault: @{FungibleToken.Vault}){ 
 			pre{ 
 				vault.isInstance(Type<@FlovatarDustToken.Vault>()):
 					"Vault not of the right Token Type"
+			}
+			// PATCH: zero-balance deposits would only create empty Containers in the contract account
+			if vault.balance == 0.0{ 
+				destroy vault
+				return
 			}
 			let ref = self.borrowFlovatarContainer(id: id)
 			emit FlovatarDepositDust(id: id, amount: vault.balance)
@@ -247,6 +277,11 @@ contract FlovatarInbox{
 			pre{ 
 				vault.isInstance(Type<@FlovatarDustToken.Vault>()):
 					"Vault not of the right Token Type"
+			}
+			// PATCH: zero-balance deposits would only create empty Containers in the contract account
+			if vault.balance == 0.0{ 
+				destroy vault
+				return
 			}
 			let ref = self.borrowWalletContainer(address: address)
 			emit WalletDepositDust(address: address, amount: vault.balance)
@@ -269,34 +304,40 @@ contract FlovatarInbox{
 		
 		access(all)
 		fun getFlovatarDustBalance(id: UInt64): UFix64{ 
-			let ref = self.borrowFlovatarContainer(id: id)
-			return ref.dustVault.balance
+			if let ref = self.peekFlovatarContainer(id: id){ 
+				return ref.dustVault.balance
+			}
+			return 0.0
 		}
 		
 		access(all)
 		fun getWalletDustBalance(address: Address): UFix64{ 
-			let ref = self.borrowWalletContainer(address: address)
-			return ref.dustVault.balance
+			if let ref = self.peekWalletContainer(address: address){ 
+				return ref.dustVault.balance
+			}
+			return 0.0
 		}
 		
 		access(all)
 		fun getFlovatarComponentIDs(id: UInt64): [UInt64]{ 
-			let ref = self.borrowFlovatarContainer(id: id)
-			return *ref.flovatarComponents.keys
+			if let ref = self.peekFlovatarContainer(id: id){ 
+				return *ref.flovatarComponents.keys
+			}
+			return []
 		}
 		
 		access(all)
 		fun getWalletComponentIDs(address: Address): [UInt64]{ 
-			let ref = self.borrowWalletContainer(address: address)
-			return *ref.flovatarComponents.keys
+			if let ref = self.peekWalletContainer(address: address){ 
+				return *ref.flovatarComponents.keys
+			}
+			return []
 		}
 		
 		access(all)
 		fun getLastClaimedDust(id: UInt64): UFix64{ 
-			if self.lastClaimedDust[id] == nil{ 
-				self.lastClaimedDust[id] = FlovatarInbox.dustDistributionStart
-			}
-			return self.lastClaimedDust[id]!
+			// PATCH: no longer writes a default entry (storage griefing via public getter)
+			return self.lastClaimedDust[id] ?? FlovatarInbox.dustDistributionStart
 		}
 		
 		access(contract)
@@ -306,26 +347,30 @@ contract FlovatarInbox{
 		
 		access(Withdraw)
 		fun withdrawFlovatarComponent(id: UInt64, withdrawID: UInt64): @{NonFungibleToken.NFT}{ 
-			let ref = self.borrowFlovatarContainer(id: id)
+			let ref = self.peekFlovatarContainer(id: id) ?? panic("missing Container")
 			return <-ref.withdrawComponent(id: withdrawID)
 		}
 		
 		access(Withdraw)
 		fun withdrawWalletComponent(address: Address, withdrawID: UInt64): @{NonFungibleToken.NFT}{ 
-			let ref = self.borrowWalletContainer(address: address)
+			let ref = self.peekWalletContainer(address: address) ?? panic("missing Container")
 			return <-ref.withdrawComponent(id: withdrawID)
 		}
 		
 		access(Withdraw)
 		fun withdrawFlovatarDust(id: UInt64): @{FungibleToken.Vault}{ 
-			let ref = self.borrowFlovatarContainer(id: id)
-			return <-ref.withdrawDust(amount: ref.dustVault.balance)
+			if let ref = self.peekFlovatarContainer(id: id){ 
+				return <-ref.withdrawDust(amount: ref.dustVault.balance)
+			}
+			return <-FlovatarDustToken.createEmptyDustVault()
 		}
 		
 		access(Withdraw)
 		fun withdrawWalletDust(address: Address): @{FungibleToken.Vault}{ 
-			let ref = self.borrowWalletContainer(address: address)
-			return <-ref.withdrawDust(amount: ref.dustVault.balance)
+			if let ref = self.peekWalletContainer(address: address){ 
+				return <-ref.withdrawDust(amount: ref.dustVault.balance)
+			}
+			return <-FlovatarDustToken.createEmptyDustVault()
 		}
 	}
 	
@@ -338,7 +383,7 @@ contract FlovatarInbox{
 	// Returns the amount of DUST received by the Flovatar for additional rewards or activities (not coming from the Community pool)
 	access(all)
 	fun getFlovatarDustBalance(id: UInt64): UFix64{ 
-		if let inboxCollection = self.account.capabilities.borrow<&FlovatarInbox.Collection>(FlovatarInbox.CollectionPublicPath){ 
+		if let inboxCollection = self.account.storage.borrow<&FlovatarInbox.Collection>(from: FlovatarInbox.CollectionStoragePath){ 
 			return inboxCollection.getFlovatarDustBalance(id: id)
 		}
 		 
@@ -349,7 +394,7 @@ contract FlovatarInbox{
 	access(all)
 	fun getWalletDustBalance(address: Address): UFix64{ 
 		
-		if let inboxCollection = self.account.capabilities.borrow<&FlovatarInbox.Collection>(FlovatarInbox.CollectionPublicPath){ 
+		if let inboxCollection = self.account.storage.borrow<&FlovatarInbox.Collection>(from: FlovatarInbox.CollectionStoragePath){ 
 			return inboxCollection.getWalletDustBalance(address: address)
 		}
 		
@@ -360,7 +405,9 @@ contract FlovatarInbox{
 	access(all)
 	fun getFlovatarComponentIDs(id: UInt64): [UInt64]{ 
 		
-		if let inboxCollection = self.account.capabilities.borrow<auth(Withdraw) &FlovatarInbox.Collection>(FlovatarInbox.CollectionPublicPath){ 
+		// PATCH: previously borrowed auth(Withdraw) from the PUBLIC path, which always returns nil,
+		// so this function always returned [] and Flovatar-assigned Flobits could never be claimed.
+		if let inboxCollection = self.account.storage.borrow<&FlovatarInbox.Collection>(from: FlovatarInbox.CollectionStoragePath){ 
 			return inboxCollection.getFlovatarComponentIDs(id: id)
 		}
 		
@@ -371,7 +418,7 @@ contract FlovatarInbox{
 	access(all)
 	fun getWalletComponentIDs(address: Address): [UInt64]{ 
 		
-		if let inboxCollection = self.account.capabilities.borrow<&FlovatarInbox.Collection>(FlovatarInbox.CollectionPublicPath){ 
+		if let inboxCollection = self.account.storage.borrow<&FlovatarInbox.Collection>(from: FlovatarInbox.CollectionStoragePath){ 
 			return inboxCollection.getWalletComponentIDs(address: address)
 		}
 		
@@ -384,6 +431,8 @@ contract FlovatarInbox{
 		pre{ 
 			self.withdrawEnabled:
 				"Withdrawal is not enabled!"
+			!FlovatarComponentTemplate.isAddressRestricted(address):
+				"Restricted: this address is restricted"
 		}
 		if let inboxCollection =
 			self.account.storage.borrow<auth(Withdraw) &FlovatarInbox.Collection>(
@@ -415,6 +464,8 @@ contract FlovatarInbox{
 		pre{ 
 			self.withdrawEnabled:
 				"Withdrawal is not enabled!"
+			!FlovatarComponentTemplate.isAddressRestricted(address):
+				"Restricted: this address is restricted"
 		}
 		if let inboxCollection =
 			self.account.storage.borrow<auth(Withdraw) &FlovatarInbox.Collection>(
@@ -447,6 +498,8 @@ contract FlovatarInbox{
 		pre{ 
 			self.withdrawEnabled:
 				"Withdrawal is not enabled!"
+			!FlovatarComponentTemplate.isAddressRestricted(address):
+				"Restricted: this address is restricted"
 		}
 		if let inboxCollection =
 			self.account.storage.borrow<auth(Withdraw) &FlovatarInbox.Collection>(
@@ -468,6 +521,8 @@ contract FlovatarInbox{
 		pre{ 
 			self.withdrawEnabled:
 				"Withdrawal is not enabled!"
+			!FlovatarComponentTemplate.isAddressRestricted(address):
+				"Restricted: this address is restricted"
 		}
 		if let inboxCollection =
 			self.account.storage.borrow<auth(Withdraw) &FlovatarInbox.Collection>(
@@ -501,7 +556,7 @@ contract FlovatarInbox{
 		if let flovatarScore: UFix64 =
 			Flovatar.getFlovatarRarityScore(address: address, flovatarId: id){ 
 			
-			if let inboxCollection = self.account.capabilities.borrow<&FlovatarInbox.Collection>(FlovatarInbox.CollectionPublicPath){ 
+			if let inboxCollection = self.account.storage.borrow<&FlovatarInbox.Collection>(from: FlovatarInbox.CollectionStoragePath){ 
 				let lastClaimed: UFix64 = inboxCollection.getLastClaimedDust(id: id)
 				let currentTime: UFix64 = getCurrentBlock().timestamp
 				let timeDiff: UFix64 = currentTime - lastClaimed
@@ -533,6 +588,8 @@ contract FlovatarInbox{
 		pre{ 
 			self.withdrawEnabled:
 				"Withdrawal is not enabled!"
+			!FlovatarComponentTemplate.isAddressRestricted(address):
+				"Restricted: this address is restricted"
 		}
 		if let claimableDust: ClaimableDust =
 			self.getClaimableFlovatarCommunityDust(id: id, address: address){ 
@@ -556,6 +613,8 @@ contract FlovatarInbox{
 		pre{ 
 			self.withdrawEnabled:
 				"Withdrawal is not enabled!"
+			!FlovatarComponentTemplate.isAddressRestricted(parent) && !FlovatarComponentTemplate.isAddressRestricted(child):
+				"Restricted: this address is restricted"
 		}
 		if parent == child{ 
 			self.claimFlovatarCommunityDust(id: id, address: parent)
