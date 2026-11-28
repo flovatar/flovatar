@@ -7,6 +7,8 @@ import "FlovatarPack"
 import "MetadataViews"
 import "FlovatarDustToken"
 import "ViewResolver"
+import "EVM"
+import "CrossVMMetadataViews"
 
 /*
 
@@ -474,6 +476,8 @@ contract Flovatar: NonFungibleToken{
 		// It checks for the right category and series before executing.
 		access(Flovatar.PrivateEnt)
 		fun setAccessory(component: @FlovatarComponent.NFT): @FlovatarComponent.NFT?{ 
+			FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: component.id)
+			FlovatarComponentTemplate.assertUsable(nftType: Type<@Flovatar.NFT>(), id: self.id)
 			if(component.getCategory() != "accessory") {
 				panic("The component needs to be an accessory")
 			}
@@ -502,6 +506,8 @@ contract Flovatar: NonFungibleToken{
 		// It checks for the right category and series before executing.
 		access(Flovatar.PrivateEnt)
 		fun setHat(component: @FlovatarComponent.NFT): @FlovatarComponent.NFT?{ 
+			FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: component.id)
+			FlovatarComponentTemplate.assertUsable(nftType: Type<@Flovatar.NFT>(), id: self.id)
 			if(component.getCategory() != "hat") {
 				panic("The component needs to be a hat")
 			}
@@ -530,6 +536,8 @@ contract Flovatar: NonFungibleToken{
 		// It checks for the right category and series before executing.
 		access(Flovatar.PrivateEnt)
 		fun setEyeglasses(component: @FlovatarComponent.NFT): @FlovatarComponent.NFT?{ 
+			FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: component.id)
+			FlovatarComponentTemplate.assertUsable(nftType: Type<@Flovatar.NFT>(), id: self.id)
 			if(component.getCategory() != "eyeglasses") {
 				panic("The component needs to be a pair of eyeglasses")
 			}
@@ -558,6 +566,8 @@ contract Flovatar: NonFungibleToken{
 		// It checks for the right category and series before executing.
 		access(Flovatar.PrivateEnt)
 		fun setBackground(component: @FlovatarComponent.NFT): @FlovatarComponent.NFT?{ 
+			FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: component.id)
+			FlovatarComponentTemplate.assertUsable(nftType: Type<@Flovatar.NFT>(), id: self.id)
 			if(component.getCategory() != "background") {
 				panic("The component needs to be a background")
 			}
@@ -581,6 +591,8 @@ contract Flovatar: NonFungibleToken{
 		// optional components (Accessory, Hat, Eyeglasses and Background) from their
 		// original Template resources, while all the other unmutable components are
 		// taken from the Metadata directly.
+		// Layer order (2026-11): background, core, accessory, eyeglasses, hat = the flovatar.com
+		// builder/site order, so Flobit combos (CSS `#trigger ~ #target` rules) also fire on-chain.
 		access(all)
 		fun getSvg(): String{ 
 			var svg: String = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 3000 3000' width='100%' height='100%'>"
@@ -590,6 +602,11 @@ contract Flovatar: NonFungibleToken{
 				}
 			}
 			svg = svg.concat(self.metadata.svg)
+			if let accessory = self.getAccessory(){ 
+				if let template = FlovatarComponentTemplate.getComponentTemplate(id: accessory){ 
+					svg = svg.concat(template.svg!)
+				}
+			}
 			if let eyeglasses = self.getEyeglasses(){ 
 				if let template = FlovatarComponentTemplate.getComponentTemplate(id: eyeglasses){ 
 					svg = svg.concat(template.svg!)
@@ -597,11 +614,6 @@ contract Flovatar: NonFungibleToken{
 			}
 			if let hat = self.getHat(){ 
 				if let template = FlovatarComponentTemplate.getComponentTemplate(id: hat){ 
-					svg = svg.concat(template.svg!)
-				}
-			}
-			if let accessory = self.getAccessory(){ 
-				if let template = FlovatarComponentTemplate.getComponentTemplate(id: accessory){ 
 					svg = svg.concat(template.svg!)
 				}
 			}
@@ -634,17 +646,19 @@ contract Flovatar: NonFungibleToken{
 		
 		access(all)
 		view fun getViews(): [Type]{ 
-			return [
-			Type<MetadataViews.NFTCollectionData>(),
-			Type<MetadataViews.NFTCollectionDisplay>(),
-			Type<MetadataViews.Display>(),
-			Type<MetadataViews.Royalties>(),
-			Type<MetadataViews.Edition>(),
-			Type<MetadataViews.ExternalURL>(),
-			Type<MetadataViews.Serial>(),
-			Type<MetadataViews.Traits>(),
-			Type<MetadataViews.EVMBridgedMetadata>()
+			let views: [Type] = [
+				Type<MetadataViews.NFTCollectionData>(),
+				Type<MetadataViews.NFTCollectionDisplay>(),
+				Type<MetadataViews.Display>(),
+				Type<MetadataViews.Royalties>(),
+				Type<MetadataViews.Editions>(),
+				Type<MetadataViews.ExternalURL>(),
+				Type<MetadataViews.Serial>(),
+				Type<MetadataViews.Traits>(),
+				Type<MetadataViews.EVMBridgedMetadata>(),
+				Type<MetadataViews.Rarity>()
 			]
+			return Flovatar.hasEVMPointer() ? views.concat([Type<CrossVMMetadataViews.EVMPointer>()]) : views
 		}
 		
 		access(all)
@@ -710,6 +724,9 @@ contract Flovatar: NonFungibleToken{
 						traits.append(trait)
 					}
 				}
+				if FlovatarComponentTemplate.isRestricted(nftType: Type<@Flovatar.NFT>(), id: self.id, owner: self.owner?.address) {
+					traits.append(MetadataViews.Trait(name: "restricted", value: true, displayType: "Boolean", rarity: nil))
+				}
 				return MetadataViews.Traits(traits)
 			}
 			if view == Type<MetadataViews.Rarity>(){ 
@@ -721,20 +738,13 @@ contract Flovatar: NonFungibleToken{
 					})
 			}
 			if view == Type<MetadataViews.EVMBridgedMetadata>(){ 
-				let contractLevel = Flovatar.resolveContractView(
-						resourceType: nil,
-						viewType: Type<MetadataViews.EVMBridgedMetadata>()
-					) as! MetadataViews.EVMBridgedMetadata?
+				let contractLevel = Flovatar.resolveContractView(resourceType: nil, viewType: Type<MetadataViews.EVMBridgedMetadata>()) as! MetadataViews.EVMBridgedMetadata?
 					?? panic("Could not resolve contract-level EVMBridgedMetadata")
-				
-				return MetadataViews.EVMBridgedMetadata(
-					name: contractLevel.name,
-					symbol: contractLevel.symbol,
-					uri: MetadataViews.URI(
-						baseURI: "https://flovatar.com/flovatars/json/",
-						value: self.id.toString()
-					)
-				)
+				// tokenURI = live ERC-721 JSON (name, description, image, attributes) served by the project API (EVM-A 2026-11)
+				return MetadataViews.EVMBridgedMetadata(name: contractLevel.name, symbol: contractLevel.symbol, uri: MetadataViews.URI(baseURI: Flovatar.getEVMHost().concat("/flovatars/json/"), value: self.id.toString()))
+			}
+			if view == Type<CrossVMMetadataViews.EVMPointer>(){ 
+				return Flovatar.getEVMPointer()
 			}
 			return nil
 		}
@@ -783,6 +793,7 @@ contract Flovatar: NonFungibleToken{
 		// withdraw removes an NFT from the collection and moves it to the caller
 		access(NonFungibleToken.Withdraw)
 		fun withdraw(withdrawID: UInt64): @{NonFungibleToken.NFT}{ 
+			FlovatarComponentTemplate.assertTransferAllowed(nftType: Type<@Flovatar.NFT>(), id: withdrawID, owner: self.owner?.address)
 			let token <- self.ownedNFTs.remove(key: withdrawID) ?? panic("missing NFT")
 			emit Withdraw(id: token.id, from: self.owner?.address)
 			return <-token
@@ -794,6 +805,7 @@ contract Flovatar: NonFungibleToken{
 		fun deposit(token: @{NonFungibleToken.NFT}){ 
 			let token <- token as! @Flovatar.NFT
 			let id: UInt64 = token.id
+			FlovatarComponentTemplate.assertDepositAllowed(nftType: Type<@Flovatar.NFT>(), id: id, to: self.owner?.address)
 			
 			// add the new token to the dictionary which removes the old one
 			let oldToken <- self.ownedNFTs[id] <- token
@@ -886,14 +898,61 @@ contract Flovatar: NonFungibleToken{
 
 
 
+	// Restriction status of a Flovatar (see FlovatarComponentTemplate restrictions)
+	access(all)
+	view fun isRestricted(id: UInt64, owner: Address?): Bool {
+		return FlovatarComponentTemplate.isRestricted(nftType: Type<@Flovatar.NFT>(), id: id, owner: owner)
+	}
+
 	access(all) 
 	view fun getContractViews(resourceType: Type?): [Type] {
-		return [
+		let views: [Type] = [
 			Type<MetadataViews.NFTCollectionData>(),
 			Type<MetadataViews.NFTCollectionDisplay>(),
 			Type<MetadataViews.EVMBridgedMetadata>()
 		]
+		return Flovatar.hasEVMPointer() ? views.concat([Type<CrossVMMetadataViews.EVMPointer>()]) : views
 	}
+	// ---- EVM-A (2026-11): cross-VM / Flow EVM metadata helpers. Functions only, no new state. ----
+
+	/// Web host serving the ERC-721 metadata JSON for this network (identical code on testnet and mainnet).
+	access(all)
+	view fun getEVMHost(): String {
+		return self.account.address == 0x921ea449dffec68a ? "https://flovatar.com" : "https://testnet.flovatar.com"
+	}
+
+	/// Account-wide cross-VM config written by an admin tx: {NFT type identifier: project ERC-721 address}.
+	access(all)
+	view fun getCrossVMConfigPath(): StoragePath {
+		return /storage/flovatarCrossVMConfig
+	}
+
+	/// True once the account stored a project ERC-721 address for this NFT type (usable in view functions).
+	access(all)
+	view fun hasEVMPointer(): Bool {
+		if let cfg = self.account.storage.borrow<&{String: EVM.EVMAddress}>(from: /storage/flovatarCrossVMConfig) {
+			return cfg[Type<@Flovatar.NFT>().identifier] != nil
+		}
+		return false
+	}
+
+	/// FLIP-318 EVMPointer to the project-owned ERC-721 (Cadence-native). nil until the account stored one for
+	/// this NFT type, so the permissionless bridge path keeps working unchanged until then.
+	access(all)
+	fun getEVMPointer(): CrossVMMetadataViews.EVMPointer? {
+		if let cfg = self.account.storage.copy<{String: EVM.EVMAddress}>(from: /storage/flovatarCrossVMConfig) {
+			if let evmAddress = cfg[Type<@Flovatar.NFT>().identifier] {
+				return CrossVMMetadataViews.EVMPointer(
+					cadenceType: Type<@Flovatar.NFT>(),
+					cadenceContractAddress: self.account.address,
+					evmContractAddress: evmAddress,
+					nativeVM: CrossVMMetadataViews.VM.Cadence
+				)
+			}
+		}
+		return nil
+	}
+
 
 
 	access(all) fun resolveContractView(resourceType: Type?, viewType: Type): AnyStruct? {
@@ -935,6 +994,8 @@ contract Flovatar: NonFungibleToken{
 						"tiktok": MetadataViews.ExternalURL("https://www.tiktok.com/@flovatar")
 					}
 				)
+			case Type<CrossVMMetadataViews.EVMPointer>():
+				return Flovatar.getEVMPointer()
 			case Type<MetadataViews.EVMBridgedMetadata>():
 				// Implementing this view gives the project control over how the bridged NFT is represented as an ERC721
 				// when bridged to EVM on Flow via the public infrastructure bridge.
@@ -945,8 +1006,8 @@ contract Flovatar: NonFungibleToken{
 					name: "Flovatar",
 					symbol: "FLVT",
 					uri: MetadataViews.URI(
-						baseURI: nil, // setting baseURI as nil sets the given value as the uri field value
-						value: "https://flovatar.com"
+						baseURI: nil, // contractURI JSON (EVM-A 2026-11)
+						value: Flovatar.getEVMHost().concat("/evm/collections/flovatar.json")
 					)
 				)
 		}
@@ -1102,6 +1163,19 @@ contract Flovatar: NonFungibleToken{
 	// for each component used
 	access(all)
 	fun createFlovatar(spark: @FlovatarComponent.NFT, body: UInt64, hair: UInt64, facialHair: UInt64?, eyes: UInt64, nose: UInt64, mouth: UInt64, clothing: UInt64, accessory: @FlovatarComponent.NFT?, hat: @FlovatarComponent.NFT?, eyeglasses: @FlovatarComponent.NFT?, background: @FlovatarComponent.NFT?, rareBoost: @[FlovatarComponent.NFT], epicBoost: @[FlovatarComponent.NFT], legendaryBoost: @[FlovatarComponent.NFT], address: Address): @Flovatar.NFT{ 
+		// Restricted components (see FlovatarComponentTemplate restrictions) can't be used to build a Flovatar
+		FlovatarComponentTemplate.assertAddressAllowed(address)
+		FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: spark.id)
+		if accessory != nil { FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: accessory?.id!) }
+		if hat != nil { FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: hat?.id!) }
+		if eyeglasses != nil { FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: eyeglasses?.id!) }
+		if background != nil { FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: background?.id!) }
+		var r = 0
+		while r < rareBoost.length { FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: rareBoost[r].id); r = r + 1 }
+		r = 0
+		while r < epicBoost.length { FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: epicBoost[r].id); r = r + 1 }
+		r = 0
+		while r < legendaryBoost.length { FlovatarComponentTemplate.assertUsable(nftType: Type<@FlovatarComponent.NFT>(), id: legendaryBoost[r].id); r = r + 1 }
 		if(spark.getCategory() != "spark"){
 			panic("The spark component belongs to the wrong category")
 		}
@@ -1305,7 +1379,9 @@ contract Flovatar: NonFungibleToken{
 			panic("This combination has already been taken")
 		}
 		let facialHairSvg: String = facialHairTemplate != nil ? facialHairTemplate?.svg! : ""
-		let svg = (bodyTemplate.svg!).concat(clothingTemplate.svg!).concat(hairTemplate.svg!).concat(eyesTemplate.svg!).concat(noseTemplate.svg!).concat(mouthTemplate.svg!).concat(facialHairSvg)
+		// Pack Rewind 2026-11-28: one String.join instead of a .concat chain (Cadence 1.0 meters every intermediate copy;
+		// heavy-art combinations exceeded the 9999 computation limit). Same bytes, same order.
+		let svg = String.join([bodyTemplate.svg!, clothingTemplate.svg!, hairTemplate.svg!, eyesTemplate.svg!, noseTemplate.svg!, mouthTemplate.svg!, facialHairSvg], separator: "")
 		
 		// TODO fix this with optional if possible. If I define it as UInt64?
 		// instead of UInt64 it's throwing an error even if it's defined in Metadata struct

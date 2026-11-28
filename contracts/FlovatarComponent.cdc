@@ -4,6 +4,8 @@ import "FlowToken"
 import "FlovatarComponentTemplate"
 import "MetadataViews"
 import "ViewResolver"
+import "EVM"
+import "CrossVMMetadataViews"
 
 /*
 
@@ -180,17 +182,19 @@ contract FlovatarComponent: NonFungibleToken{
 		// available on the market.
 		access(all)
 		view fun getViews(): [Type]{ 
-			return [
-			Type<MetadataViews.NFTCollectionData>(),
-			Type<MetadataViews.NFTCollectionDisplay>(),
-			Type<MetadataViews.Display>(),
-			Type<MetadataViews.Royalties>(),
-			Type<MetadataViews.Edition>(),
-			Type<MetadataViews.ExternalURL>(),
-			Type<MetadataViews.Serial>(),
-			Type<MetadataViews.Traits>(),
-			Type<MetadataViews.EVMBridgedMetadata>()
+			let views: [Type] = [
+				Type<MetadataViews.NFTCollectionData>(),
+				Type<MetadataViews.NFTCollectionDisplay>(),
+				Type<MetadataViews.Display>(),
+				Type<MetadataViews.Royalties>(),
+				Type<MetadataViews.Editions>(),
+				Type<MetadataViews.ExternalURL>(),
+				Type<MetadataViews.Serial>(),
+				Type<MetadataViews.Traits>(),
+				Type<MetadataViews.EVMBridgedMetadata>(),
+				Type<MetadataViews.Rarity>()
 			]
+			return FlovatarComponent.hasEVMPointer() ? views.concat([Type<CrossVMMetadataViews.EVMPointer>()]) : views
 		}
 		
 		access(all)
@@ -229,6 +233,10 @@ contract FlovatarComponent: NonFungibleToken{
 				traits.append(trait)
 				let setTrait = MetadataViews.Trait(name: "set", value: template.category, displayType: "String", rarity: nil)
 				traits.append(setTrait)
+				// Restriction flag (see FlovatarComponentTemplate restrictions), only present when restricted
+				if FlovatarComponentTemplate.isRestricted(nftType: Type<@FlovatarComponent.NFT>(), id: self.id, owner: self.owner?.address) {
+					traits.append(MetadataViews.Trait(name: "restricted", value: true, displayType: "Boolean", rarity: nil))
+				}
 				return MetadataViews.Traits(traits)
 			}
 			if view == Type<MetadataViews.Rarity>(){ 
@@ -242,20 +250,13 @@ contract FlovatarComponent: NonFungibleToken{
 			}
 
 			if view == Type<MetadataViews.EVMBridgedMetadata>(){ 
-				let contractLevel = FlovatarComponent.resolveContractView(
-						resourceType: nil,
-						viewType: Type<MetadataViews.EVMBridgedMetadata>()
-					) as! MetadataViews.EVMBridgedMetadata?
+				let contractLevel = FlovatarComponent.resolveContractView(resourceType: nil, viewType: Type<MetadataViews.EVMBridgedMetadata>()) as! MetadataViews.EVMBridgedMetadata?
 					?? panic("Could not resolve contract-level EVMBridgedMetadata")
-				
-				return MetadataViews.EVMBridgedMetadata(
-					name: contractLevel.name,
-					symbol: contractLevel.symbol,
-					uri: MetadataViews.URI(
-						baseURI: "https://flovatar.com/components/json/",
-						value: self.id.toString()
-					)
-				)
+				// tokenURI = live ERC-721 JSON (name, description, image, attributes) served by the project API (EVM-A 2026-11)
+				return MetadataViews.EVMBridgedMetadata(name: contractLevel.name, symbol: contractLevel.symbol, uri: MetadataViews.URI(baseURI: FlovatarComponent.getEVMHost().concat("/components/json/"), value: self.id.toString()))
+			}
+			if view == Type<CrossVMMetadataViews.EVMPointer>(){ 
+				return FlovatarComponent.getEVMPointer()
 			}
 			return nil
 		}
@@ -309,6 +310,7 @@ contract FlovatarComponent: NonFungibleToken{
 		// withdraw removes an NFT from the collection and moves it to the caller
 		access(NonFungibleToken.Withdraw)
 		fun withdraw(withdrawID: UInt64): @{NonFungibleToken.NFT}{ 
+			FlovatarComponentTemplate.assertTransferAllowed(nftType: Type<@FlovatarComponent.NFT>(), id: withdrawID, owner: self.owner?.address)
 			let token <- self.ownedNFTs.remove(key: withdrawID) ?? panic("missing NFT")
 			emit Withdraw(id: token.id, from: self.owner?.address)
 			return <-token
@@ -320,6 +322,7 @@ contract FlovatarComponent: NonFungibleToken{
 		fun deposit(token: @{NonFungibleToken.NFT}){ 
 			let token <- token as! @FlovatarComponent.NFT
 			let id: UInt64 = token.id
+			FlovatarComponentTemplate.assertDepositAllowed(nftType: Type<@FlovatarComponent.NFT>(), id: id, to: self.owner?.address)
 			
 			// add the new token to the dictionary which removes the old one
 			let oldToken <- self.ownedNFTs[id] <- token
@@ -387,14 +390,61 @@ contract FlovatarComponent: NonFungibleToken{
 
 
 
+	// Restriction status of a component (see FlovatarComponentTemplate restrictions)
+	access(all)
+	view fun isRestricted(id: UInt64, owner: Address?): Bool {
+		return FlovatarComponentTemplate.isRestricted(nftType: Type<@FlovatarComponent.NFT>(), id: id, owner: owner)
+	}
+
 	access(all) 
 	view fun getContractViews(resourceType: Type?): [Type] {
-		return [
+		let views: [Type] = [
 			Type<MetadataViews.NFTCollectionData>(),
 			Type<MetadataViews.NFTCollectionDisplay>(),
 			Type<MetadataViews.EVMBridgedMetadata>()
 		]
+		return FlovatarComponent.hasEVMPointer() ? views.concat([Type<CrossVMMetadataViews.EVMPointer>()]) : views
 	}
+	// ---- EVM-A (2026-11): cross-VM / Flow EVM metadata helpers. Functions only, no new state. ----
+
+	/// Web host serving the ERC-721 metadata JSON for this network (identical code on testnet and mainnet).
+	access(all)
+	view fun getEVMHost(): String {
+		return self.account.address == 0x921ea449dffec68a ? "https://flovatar.com" : "https://testnet.flovatar.com"
+	}
+
+	/// Account-wide cross-VM config written by an admin tx: {NFT type identifier: project ERC-721 address}.
+	access(all)
+	view fun getCrossVMConfigPath(): StoragePath {
+		return /storage/flovatarCrossVMConfig
+	}
+
+	/// True once the account stored a project ERC-721 address for this NFT type (usable in view functions).
+	access(all)
+	view fun hasEVMPointer(): Bool {
+		if let cfg = self.account.storage.borrow<&{String: EVM.EVMAddress}>(from: /storage/flovatarCrossVMConfig) {
+			return cfg[Type<@FlovatarComponent.NFT>().identifier] != nil
+		}
+		return false
+	}
+
+	/// FLIP-318 EVMPointer to the project-owned ERC-721 (Cadence-native). nil until the account stored one for
+	/// this NFT type, so the permissionless bridge path keeps working unchanged until then.
+	access(all)
+	fun getEVMPointer(): CrossVMMetadataViews.EVMPointer? {
+		if let cfg = self.account.storage.copy<{String: EVM.EVMAddress}>(from: /storage/flovatarCrossVMConfig) {
+			if let evmAddress = cfg[Type<@FlovatarComponent.NFT>().identifier] {
+				return CrossVMMetadataViews.EVMPointer(
+					cadenceType: Type<@FlovatarComponent.NFT>(),
+					cadenceContractAddress: self.account.address,
+					evmContractAddress: evmAddress,
+					nativeVM: CrossVMMetadataViews.VM.Cadence
+				)
+			}
+		}
+		return nil
+	}
+
 
 
 	access(all) fun resolveContractView(resourceType: Type?, viewType: Type): AnyStruct? {
@@ -436,6 +486,8 @@ contract FlovatarComponent: NonFungibleToken{
 						"tiktok": MetadataViews.ExternalURL("https://www.tiktok.com/@flovatar")
 					}
 				)
+			case Type<CrossVMMetadataViews.EVMPointer>():
+				return FlovatarComponent.getEVMPointer()
 			case Type<MetadataViews.EVMBridgedMetadata>():
 				// Implementing this view gives the project control over how the bridged NFT is represented as an ERC721
 				// when bridged to EVM on Flow via the public infrastructure bridge.
@@ -446,8 +498,8 @@ contract FlovatarComponent: NonFungibleToken{
 					name: "Flovatar Component",
 					symbol: "FLVC",
 					uri: MetadataViews.URI(
-						baseURI: nil, // setting baseURI as nil sets the given value as the uri field value
-						value: "https://flovatar.com"
+						baseURI: nil, // contractURI JSON (EVM-A 2026-11)
+						value: FlovatarComponent.getEVMHost().concat("/evm/collections/flobits.json")
 					)
 				)
 		}

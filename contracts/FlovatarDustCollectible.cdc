@@ -6,6 +6,8 @@ import "FlovatarDustCollectibleAccessory"
 import "MetadataViews"
 import "FlovatarDustToken"
 import "ViewResolver"
+import "EVM"
+import "CrossVMMetadataViews"
 
 /*
 
@@ -453,17 +455,18 @@ contract FlovatarDustCollectible: NonFungibleToken{
 		
 		access(all)
 		view fun getViews(): [Type]{ 
-			return [
-			Type<MetadataViews.NFTCollectionData>(),
-			Type<MetadataViews.NFTCollectionDisplay>(),
-			Type<MetadataViews.Display>(),
-			Type<MetadataViews.Royalties>(),
-			Type<MetadataViews.Edition>(),
-			Type<MetadataViews.ExternalURL>(),
-			Type<MetadataViews.Serial>(),
-			Type<MetadataViews.Traits>(),
-			Type<MetadataViews.EVMBridgedMetadata>()
+			let views: [Type] = [
+				Type<MetadataViews.NFTCollectionData>(),
+				Type<MetadataViews.NFTCollectionDisplay>(),
+				Type<MetadataViews.Display>(),
+				Type<MetadataViews.Royalties>(),
+				Type<MetadataViews.Editions>(),
+				Type<MetadataViews.ExternalURL>(),
+				Type<MetadataViews.Serial>(),
+				Type<MetadataViews.Traits>(),
+				Type<MetadataViews.EVMBridgedMetadata>()
 			]
+			return FlovatarDustCollectible.hasEVMPointer() ? views.concat([Type<CrossVMMetadataViews.EVMPointer>()]) : views
 		}
 		
 		access(all)
@@ -525,20 +528,13 @@ contract FlovatarDustCollectible: NonFungibleToken{
 					})
 			}
 			if view == Type<MetadataViews.EVMBridgedMetadata>(){ 
-				let contractLevel = FlovatarDustCollectible.resolveContractView(
-						resourceType: nil,
-						viewType: Type<MetadataViews.EVMBridgedMetadata>()
-					) as! MetadataViews.EVMBridgedMetadata?
+				let contractLevel = FlovatarDustCollectible.resolveContractView(resourceType: nil, viewType: Type<MetadataViews.EVMBridgedMetadata>()) as! MetadataViews.EVMBridgedMetadata?
 					?? panic("Could not resolve contract-level EVMBridgedMetadata")
-				
-				return MetadataViews.EVMBridgedMetadata(
-					name: contractLevel.name,
-					symbol: contractLevel.symbol,
-					uri: MetadataViews.URI(
-						baseURI: "https://flovatar.com/collectibles/json/",
-						value: self.id.toString()
-					)
-				)
+				// tokenURI = live ERC-721 JSON (name, description, image, attributes) served by the project API (EVM-A 2026-11)
+				return MetadataViews.EVMBridgedMetadata(name: contractLevel.name, symbol: contractLevel.symbol, uri: MetadataViews.URI(baseURI: FlovatarDustCollectible.getEVMHost().concat("/collectibles/json/"), value: self.id.toString()))
+			}
+			if view == Type<CrossVMMetadataViews.EVMPointer>(){ 
+				return FlovatarDustCollectible.getEVMPointer()
 			}
 			return nil
 		}
@@ -688,12 +684,53 @@ contract FlovatarDustCollectible: NonFungibleToken{
 
 	access(all) 
 	view fun getContractViews(resourceType: Type?): [Type] {
-		return [
+		let views: [Type] = [
 			Type<MetadataViews.NFTCollectionData>(),
 			Type<MetadataViews.NFTCollectionDisplay>(),
 			Type<MetadataViews.EVMBridgedMetadata>()
 		]
+		return FlovatarDustCollectible.hasEVMPointer() ? views.concat([Type<CrossVMMetadataViews.EVMPointer>()]) : views
 	}
+	// ---- EVM-A (2026-11): cross-VM / Flow EVM metadata helpers. Functions only, no new state. ----
+
+	/// Web host serving the ERC-721 metadata JSON for this network (identical code on testnet and mainnet).
+	access(all)
+	view fun getEVMHost(): String {
+		return self.account.address == 0x921ea449dffec68a ? "https://flovatar.com" : "https://testnet.flovatar.com"
+	}
+
+	/// Account-wide cross-VM config written by an admin tx: {NFT type identifier: project ERC-721 address}.
+	access(all)
+	view fun getCrossVMConfigPath(): StoragePath {
+		return /storage/flovatarCrossVMConfig
+	}
+
+	/// True once the account stored a project ERC-721 address for this NFT type (usable in view functions).
+	access(all)
+	view fun hasEVMPointer(): Bool {
+		if let cfg = self.account.storage.borrow<&{String: EVM.EVMAddress}>(from: /storage/flovatarCrossVMConfig) {
+			return cfg[Type<@FlovatarDustCollectible.NFT>().identifier] != nil
+		}
+		return false
+	}
+
+	/// FLIP-318 EVMPointer to the project-owned ERC-721 (Cadence-native). nil until the account stored one for
+	/// this NFT type, so the permissionless bridge path keeps working unchanged until then.
+	access(all)
+	fun getEVMPointer(): CrossVMMetadataViews.EVMPointer? {
+		if let cfg = self.account.storage.copy<{String: EVM.EVMAddress}>(from: /storage/flovatarCrossVMConfig) {
+			if let evmAddress = cfg[Type<@FlovatarDustCollectible.NFT>().identifier] {
+				return CrossVMMetadataViews.EVMPointer(
+					cadenceType: Type<@FlovatarDustCollectible.NFT>(),
+					cadenceContractAddress: self.account.address,
+					evmContractAddress: evmAddress,
+					nativeVM: CrossVMMetadataViews.VM.Cadence
+				)
+			}
+		}
+		return nil
+	}
+
 
 
 	access(all) fun resolveContractView(resourceType: Type?, viewType: Type): AnyStruct? {
@@ -735,6 +772,8 @@ contract FlovatarDustCollectible: NonFungibleToken{
 						"tiktok": MetadataViews.ExternalURL("https://www.tiktok.com/@flovatar")
 					}
 				)
+			case Type<CrossVMMetadataViews.EVMPointer>():
+				return FlovatarDustCollectible.getEVMPointer()
 			case Type<MetadataViews.EVMBridgedMetadata>():
 				// Implementing this view gives the project control over how the bridged NFT is represented as an ERC721
 				// when bridged to EVM on Flow via the public infrastructure bridge.
@@ -742,11 +781,11 @@ contract FlovatarDustCollectible: NonFungibleToken{
 				// Compose the contract-level URI. In this case, the contract metadata is located on some HTTP host,
 				// but it could be IPFS, S3, a data URL containing the JSON directly, etc.
 				return MetadataViews.EVMBridgedMetadata(
-					name: "FlovatarDustCollectible",
-					symbol: "XMPL",
+					name: "Flovatar Dust Collectible",
+					symbol: "FLDC",
 					uri: MetadataViews.URI(
-						baseURI: nil, // setting baseURI as nil sets the given value as the uri field value
-						value: "https://flovatar.com"
+						baseURI: nil, // contractURI JSON (EVM-A 2026-11)
+						value: FlovatarDustCollectible.getEVMHost().concat("/evm/collections/collectibles.json")
 					)
 				)
 		}
